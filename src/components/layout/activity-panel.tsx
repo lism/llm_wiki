@@ -8,7 +8,15 @@ import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useFileSyncStore } from "@/stores/file-sync-store"
 import { normalizePath, getFileName, isAbsolutePath } from "@/lib/path-utils"
-import { getQueue, getQueueSummary, retryTask, cancelTask, cancelAllTasks, type IngestTask } from "@/lib/ingest-queue"
+import {
+  getQueue,
+  getQueueSummary,
+  retryTask,
+  retryAllFailedTasks,
+  cancelTask,
+  cancelAllTasks,
+  type IngestTask,
+} from "@/lib/ingest-queue"
 import {
   ignoreFileChangeTask,
   rescanProjectFiles,
@@ -74,6 +82,11 @@ export function ActivityPanel() {
   const handleIngestRetry = useCallback((taskId: string) => {
     if (!project) return
     retryTask(taskId)
+  }, [project])
+
+  const handleRetryAllFailed = useCallback(() => {
+    if (!project) return
+    void retryAllFailedTasks().then(() => setQueueTasks([...getQueue()]))
   }, [project])
 
   const handleIngestCancel = useCallback((taskId: string) => {
@@ -226,12 +239,39 @@ export function ActivityPanel() {
                     Cancel all
                   </button>
                 )}
+                {queueSummary.failed > 0 && (
+                  <button
+                    onClick={handleRetryAllFailed}
+                    className="rounded px-1.5 py-0.5 text-[10px] hover:bg-accent hover:text-foreground"
+                    title="Retry all failed ingest tasks"
+                  >
+                    Retry failed
+                  </button>
+                )}
               </div>
               <div className="h-1.5 rounded-full bg-muted overflow-hidden">
                 <div
                   className="h-full rounded-full bg-primary transition-all"
                   style={{ width: `${((queueSummary.total - queueSummary.pending - queueSummary.processing) / Math.max(queueSummary.total, 1)) * 100}%` }}
                 />
+              </div>
+            </div>
+          )}
+
+          {hasQueue && queueSummary.processing === 0 && queueSummary.pending === 0 && queueSummary.failed > 0 && (
+            <div className="px-3 py-1.5 border-b border-border/50">
+              <div className="flex items-center justify-between text-[10px] text-muted-foreground gap-2">
+                <span>Ingest Queue</span>
+                <span className="flex-1 text-right">
+                  {queueSummary.failed} failed
+                </span>
+                <button
+                  onClick={handleRetryAllFailed}
+                  className="rounded px-1.5 py-0.5 text-[10px] hover:bg-accent hover:text-foreground"
+                  title="Retry all failed ingest tasks"
+                >
+                  Retry failed
+                </button>
               </div>
             </div>
           )}

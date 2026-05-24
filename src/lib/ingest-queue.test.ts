@@ -54,6 +54,7 @@ import {
   enqueueIngest,
   enqueueBatch,
   retryTask,
+  retryAllFailedTasks,
   cancelTask,
   cancelAllTasks,
   clearCompletedTasks,
@@ -211,6 +212,52 @@ describe("ingest-queue — retry & failure", () => {
     await flushMicrotasks(10)
 
     expect(getQueue()).toHaveLength(0)
+  })
+
+  it("retryAllFailedTasks requeues every failed task and resumes processing", async () => {
+    const saved = [
+      {
+        id: "ingest-failed-a",
+        sourcePath: "a.md",
+        folderContext: "",
+        status: "failed",
+        addedAt: 0,
+        error: "rate limit",
+        retryCount: 3,
+      },
+      {
+        id: "ingest-failed-b",
+        sourcePath: "b.md",
+        folderContext: "",
+        status: "failed",
+        addedAt: 1,
+        error: "timeout",
+        retryCount: 3,
+      },
+    ]
+    mockReadFile.mockResolvedValue(JSON.stringify(saved))
+    mockAutoIngest.mockImplementation(() => new Promise(() => {}))
+
+    await restoreQueue(TEST_ID, TEST_PATH)
+    mockWriteFile.mockClear()
+
+    const requeued = await retryAllFailedTasks()
+    await flushMicrotasks(2)
+
+    expect(requeued).toBe(2)
+    expect(mockAutoIngest).toHaveBeenCalledOnce()
+    expect(getQueue().map((task) => task.error)).toEqual([null, null])
+    expect(getQueue().map((task) => task.status)).toEqual(["processing", "pending"])
+    expect(mockWriteFile).toHaveBeenCalled()
+  })
+
+  it("retryAllFailedTasks returns 0 when there are no failed tasks", async () => {
+    mockAutoIngest.mockImplementation(() => new Promise(() => {}))
+
+    const requeued = await retryAllFailedTasks()
+
+    expect(requeued).toBe(0)
+    expect(mockAutoIngest).not.toHaveBeenCalled()
   })
 })
 
