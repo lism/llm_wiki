@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
+use crate::commands::chat;
 use crate::cors::{local_cors_headers, request_origin};
 use crate::{clip_server, commands, server_bind};
 
@@ -186,22 +187,39 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
         eprintln!("[API Server] request panicked: {payload:?}");
         err(500, "Internal API server error")
     });
-    respond_json(request, response.status, response.body, origin.as_deref());
+
+    if let Some(sse) = response.sse {
+        respond_sse(request, sse, origin.as_deref());
+    } else {
+        respond_json(request, response.status, response.body, origin.as_deref());
+    }
 }
 
 struct ApiResponse {
     status: u16,
     body: Value,
+    /// When set, `process_request` streams this payload as SSE instead
+    /// of writing a JSON response.  Only used by the chat endpoint.
+    sse: Option<SsePayload>,
+}
+
+/// Data needed to run a chat query and stream the result via SSE.
+struct SsePayload {
+    project_path: String,
+    query: String,
+    llm_config: chat::ChatLlmConfig,
+    embedding_config: Option<SearchEmbeddingConfig>,
 }
 
 fn ok(body: Value) -> ApiResponse {
-    ApiResponse { status: 200, body }
+    ApiResponse { status: 200, body, sse: None }
 }
 
 fn err(status: u16, message: impl Into<String>) -> ApiResponse {
     ApiResponse {
         status,
         body: json!({ "ok": false, "error": message.into() }),
+        sse: None,
     }
 }
 
@@ -278,8 +296,53 @@ fn handle_request(
             handle_rescan(app, project_id)
         }
         (&Method::Post, ["projects", project_id, "chat"]) => {
-            let _ = project_id;
-            err(501, "Chat API is not implemented in the local Rust API server yet. The existing chat/RAG pipeline currently lives in the WebView; expose it after moving the shared chat pipeline behind a backend command.")
+            let _project = match resolve_project(app, project_id) {
+                Ok(p) => p,
+                Err(e) => return err(404, e),
+            };
+            let app_state = load_app_state(app).unwrap_or_default();
+            let Some(llm_config) = chat::resolve_llm_config(&app_state) else {
+                return err(
+                    400,
+                    "No LLM config. Configure an LLM provider in Settings first.",
+                );
+            };
+            let req: chat::ChatRequest = match serde_json::from_str(body) {
+                Ok(r) => r,
+                Err(e) => return err(400, format!("Invalid request body: {e}")),
+            };
+            if req.query.trim().is_empty() {
+                return err(400, "query is required");
+            }
+            let embedding_config = load_embedding_config(app);
+
+            if req.stream {
+                // Signal to process_request that this is a streaming response.
+                // We encode the parameters into a special ApiResponse the caller
+                // (process_request) recognizes and handles with SSE.
+                return streaming_chat_response(
+                    _project.path,
+                    req.query,
+                    llm_config,
+                    embedding_config,
+                );
+            }
+
+            // Non-streaming: block on the full response.
+            match tauri::async_runtime::block_on(chat::run_chat_query(
+                &_project.path,
+                &req.query,
+                &llm_config,
+                embedding_config,
+            )) {
+                Ok((response, _events)) => ok(json!({
+                    "ok": true,
+                    "projectId": _project.id,
+                    "answer": response.answer,
+                    "references": response.references,
+                })),
+                Err(e) => err(500, e),
+            }
         }
         _ => err(404, "Not found"),
     }
@@ -1851,6 +1914,167 @@ fn load_source_watch_config(
         )
         .ok()
     })
+}
+
+/// Build an ApiResponse that tells `process_request` to serve an SSE
+/// chat stream instead of a JSON response.
+fn streaming_chat_response(
+    project_path: String,
+    query: String,
+    llm_config: chat::ChatLlmConfig,
+    embedding_config: Option<SearchEmbeddingConfig>,
+) -> ApiResponse {
+    ApiResponse {
+        status: 200,
+        body: json!({}),
+        sse: Some(SsePayload {
+            project_path,
+            query,
+            llm_config,
+            embedding_config,
+        }),
+    }
+}
+
+/// Write an SSE (Server-Sent Events) stream on an HTTP connection.
+///
+/// Spawns a background thread with its own tokio runtime to run the
+/// async chat pipeline, then bridges the stream events into SSE frames
+/// written to the tiny_http connection via a blocking `Read` adapter.
+fn respond_sse(request: tiny_http::Request, payload: SsePayload, origin: Option<&str>) {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+    // Spawn the LLM chat in a background thread so the HTTP writer
+    // thread can block on `rx.recv()` without starving the tokio
+    // reactor.  The spawned thread creates its own runtime.
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(
+                    format!(
+                        "event: error\ndata: {}\n\n",
+                        json!({ "error": format!("Failed to create runtime: {e}") })
+                    )
+                    .into_bytes(),
+                );
+                let _ = tx.send(vec![]); // signal done
+                return;
+            }
+        };
+
+        let result = rt.block_on(chat::run_chat_query(
+            &payload.project_path,
+            &payload.query,
+            &payload.llm_config,
+            payload.embedding_config,
+        ));
+
+        match result {
+            Ok((chat_response, events)) => {
+                for event in events {
+                    let frame = match event {
+                        chat::StreamEvent::Token(t) => {
+                            format!(
+                                "event: token\ndata: {}\n\n",
+                                serde_json::to_string(&json!(t)).unwrap_or_default()
+                            )
+                        }
+                        chat::StreamEvent::Done => {
+                            // Send references as the final event before done.
+                            let refs_json = serde_json::to_string(&chat_response.references)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            let _ = tx.send(
+                                format!("event: references\ndata: {refs_json}\n\n").into_bytes(),
+                            );
+                            "event: done\ndata: {}\n\n".to_string()
+                        }
+                        chat::StreamEvent::Error(e) => {
+                            format!(
+                                "event: error\ndata: {}\n\n",
+                                serde_json::to_string(&json!({ "error": e })).unwrap_or_default()
+                            )
+                        }
+                    };
+                    if tx.send(frame.into_bytes()).is_err() {
+                        break; // client disconnected
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(
+                    format!(
+                        "event: error\ndata: {}\n\n",
+                        serde_json::to_string(&json!({ "error": e })).unwrap_or_default()
+                    )
+                    .into_bytes(),
+                );
+            }
+        }
+        let _ = tx.send(vec![]); // signal done
+    });
+
+    // Write SSE headers and stream the body.
+    let mut headers: Vec<Header> = cors_headers(origin);
+    headers.push(Header::from_bytes("Content-Type", "text/event-stream").unwrap());
+    headers.push(Header::from_bytes("Cache-Control", "no-cache").unwrap());
+    headers.push(Header::from_bytes("Connection", "keep-alive").unwrap());
+    headers.push(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+
+    let reader = SseReader {
+        rx,
+        buf: std::io::Cursor::new(vec![]),
+        done: false,
+    };
+
+    let response = tiny_http::Response::new(
+        tiny_http::StatusCode(200),
+        headers,
+        Box::new(reader) as Box<dyn std::io::Read + Send>,
+        None,
+        None,
+    );
+
+    let _ = request.respond(response);
+}
+
+/// Blocking `Read` adapter backed by a channel receiver.  Used to
+/// funnel SSE frames from a background thread into tiny_http's
+/// response body reader.
+struct SseReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: std::io::Cursor<Vec<u8>>,
+    done: bool,
+}
+
+impl std::io::Read for SseReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let pos = self.buf.position() as usize;
+            let remaining = &self.buf.get_ref()[pos..];
+            if !remaining.is_empty() {
+                let n = remaining.len().min(buf.len());
+                buf[..n].copy_from_slice(&remaining[..n]);
+                self.buf.set_position((pos + n) as u64);
+                return Ok(n);
+            }
+            if self.done {
+                return Ok(0);
+            }
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    if chunk.is_empty() {
+                        self.done = true;
+                    } else {
+                        self.buf = std::io::Cursor::new(chunk);
+                    }
+                }
+                Err(_) => {
+                    self.done = true;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
