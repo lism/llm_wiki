@@ -112,6 +112,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code signing — skip when Apple secrets aren't configured.
+          # Set CSC_IDENTITY_AUTO_DISCOVERY=false so codesign doesn't try
+          # to find an identity from the default keychain (which fails with
+          # "failed to import keychain certificate" when secrets are empty).
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
