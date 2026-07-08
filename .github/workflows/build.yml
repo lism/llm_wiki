@@ -108,6 +108,26 @@ jobs:
           npm --prefix mcp-server ci
           npm run mcp:build
 
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          APP_VERSION="$(node -p "require('./package.json').version")"
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-triggered: use the tag name as-is.
+            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "release_name=LLM Wiki ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            # Manual dispatch: create a dated pre-release so artifacts
+            # always land on the Releases page and don't collide across runs.
+            TS="$(date -u +%Y%m%d-%H%M%S)"
+            echo "tag_name=v${APP_VERSION}-preview-${TS}" >> "$GITHUB_OUTPUT"
+            echo "release_name=LLM Wiki v${APP_VERSION} (preview ${TS})" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -122,16 +142,11 @@ jobs:
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          # Tag-triggered runs publish a real GitHub Release.
-          # Manual (workflow_dispatch) runs leave tagName/releaseName
-          # empty so tauri-action skips the release-upload step and
-          # just produces bundle artifacts — useful for testing a
-          # branch build without polluting the Releases page.
-          tagName: ${{ github.event_name == 'push' && github.ref_name || '' }}
-          releaseName: ${{ github.event_name == 'push' && format('LLM Wiki {0}', github.ref_name) || '' }}
+          tagName: ${{ steps.release_meta.outputs.tag_name }}
+          releaseName: ${{ steps.release_meta.outputs.release_name }}
           releaseBody: 'See the assets below for download links.'
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ steps.release_meta.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }}
 
       - name: Package Windows portable zip
@@ -142,19 +157,16 @@ jobs:
           .github/scripts/package-windows-portable.ps1 -Version $version
 
       - name: Attach Windows portable zip to release
-        if: github.event_name == 'push' && matrix.platform == 'windows-latest'
+        if: matrix.platform == 'windows-latest'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          gh release upload "${{ github.ref_name }}" dist-portable/*.zip --clobber
+          gh release upload "${{ steps.release_meta.outputs.tag_name }}" dist-portable/*.zip --clobber
 
-      # On workflow_dispatch, no release is created, so the bundles
-      # would otherwise be discarded with the runner. Upload them as
-      # workflow artifacts so the maintainer can `gh run download`
-      # the .msi / .exe / .dmg / .deb to test locally. Skipped on
-      # tag pushes since the release page already has them.
-      - name: Upload bundles as workflow artifacts (manual runs only)
+      # Always upload as workflow artifacts as a backup (useful for
+      # `gh run download` without hunting through the Releases page).
+      - name: Upload bundles as workflow artifacts
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
@@ -175,20 +187,26 @@ jobs:
   package-extension:
     name: Package browser extension
     needs: build
-    # Browser extension is only published as part of an actual
-    # tagged release; manual builds don't need it.
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve release metadata
+        id: release_meta
+        run: |
+          APP_VERSION="$(node -p "require('./package.json').version")"
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            TS="$(date -u +%Y%m%d-%H%M%S)"
+            echo "tag_name=v${APP_VERSION}-preview-${TS}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Sync extension manifest version and zip
         run: |
-          # Pull version from package.json so we have a single source of
-          # truth. Chrome's manifest requires numeric-only version
-          # (e.g. 0.3.5), which matches the repo's semver convention.
-          APP_VERSION=$(node -p "require('./package.json').version")
+          APP_VERSION="${{ steps.release_meta.outputs.app_version }}"
           node -e "
             const fs = require('fs');
             const p = 'extension/manifest.json';
@@ -204,4 +222,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" dist-extension/*.zip --clobber
+          gh release upload "${{ steps.release_meta.outputs.tag_name }}" dist-extension/*.zip --clobber
