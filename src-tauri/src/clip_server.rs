@@ -46,6 +46,8 @@ pub fn all_projects() -> Vec<(String, String)> {
 
 pub fn start_clip_server(app: AppHandle) {
     thread::spawn(move || {
+        let mut restart_count: u32 = 0;
+
         loop {
             // Try to bind the port with retries
             let (server, addr) = {
