@@ -46,8 +46,6 @@ pub fn all_projects() -> Vec<(String, String)> {
 
 pub fn start_clip_server(app: AppHandle) {
     thread::spawn(move || {
-        let mut restart_count: u32 = 0;
-
         loop {
             // Try to bind the port with retries
             let (server, addr) = {
@@ -89,7 +87,6 @@ pub fn start_clip_server(app: AppHandle) {
             };
 
             DAEMON_STATUS.store(1, Ordering::Relaxed); // running
-            restart_count = 0; // Reset on successful bind
             println!("[Clip Server] Listening on http://{}", addr);
 
             for mut request in server.incoming_requests() {

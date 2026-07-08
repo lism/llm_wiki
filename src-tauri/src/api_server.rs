@@ -14,6 +14,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
 use crate::commands::chat;
+use crate::commands::search::SearchEmbeddingConfig;
 use crate::cors::{local_cors_headers, request_origin};
 use crate::{clip_server, commands, server_bind};
 
