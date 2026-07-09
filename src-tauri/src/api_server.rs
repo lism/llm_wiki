@@ -518,14 +518,6 @@ fn load_app_state(ctx: &ApiContext) -> Option<Value> {
     value
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectEntry {
-    id: String,
-    name: String,
-    path: String,
-    current: bool,
-}
-
 fn handle_projects(ctx: &ApiContext) -> ApiResponse {
     let projects = load_projects(ctx);
     let current_project = projects.iter().find(|project| project.current).cloned();

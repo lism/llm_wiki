@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::commands::search::SearchEmbeddingConfig;
@@ -45,7 +46,7 @@ pub struct ApiContext {
     pub tokio_handle: tokio::runtime::Handle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub id: String,
     pub name: String,
@@ -124,8 +125,11 @@ impl ApiContext {
                 return Some(trimmed.to_string());
             }
         }
-        self.load_app_state()
-            .and_then(|v| v.get("apiConfig")?.get("token")?.as_str())
+        let parsed = self.load_app_state()?;
+        parsed
+            .get("apiConfig")
+            .and_then(|v| v.get("token"))
+            .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned)
     }
