@@ -11,6 +11,9 @@ permissions:
 
 jobs:
   build:
+    outputs:
+      tag_name: ${{ steps.release_meta.outputs.tag_name }}
+      app_version: ${{ steps.release_meta.outputs.app_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -206,21 +209,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve release metadata
-        id: release_meta
-        run: |
-          APP_VERSION="$(node -p "require('./package.json').version")"
-          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            TS="$(date -u +%Y%m%d-%H%M%S)"
-            echo "tag_name=v${APP_VERSION}-preview-${TS}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Sync extension manifest version and zip
         run: |
-          APP_VERSION="${{ steps.release_meta.outputs.app_version }}"
+          APP_VERSION="${{ needs.build.outputs.app_version }}"
           node -e "
             const fs = require('fs');
             const p = 'extension/manifest.json';
@@ -236,4 +227,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ steps.release_meta.outputs.tag_name }}" dist-extension/*.zip --clobber
+          gh release upload "${{ needs.build.outputs.tag_name }}" dist-extension/*.zip --clobber
