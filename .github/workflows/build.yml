@@ -159,7 +159,20 @@ jobs:
             cargo build --release --bin llm-wiki-api --bin llm-wiki-ingest
           fi
 
-      - name: Package standalone binaries
+      - name: Package standalone binaries (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $rustTarget = "${{ matrix.rust_target }}"
+          $targetDir = if ($rustTarget) { "src-tauri/target/$rustTarget/release" } else { "src-tauri/target/release" }
+          New-Item -ItemType Directory -Force -Path dist-standalone | Out-Null
+          Copy-Item "$targetDir/llm-wiki-api.exe" dist-standalone/ -ErrorAction SilentlyContinue
+          Copy-Item "$targetDir/llm-wiki-ingest.exe" dist-standalone/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist-standalone/*.exe -DestinationPath dist-standalone/llm-wiki-standalone-windows.zip
+          Get-ChildItem dist-standalone/
+
+      - name: Package standalone binaries (Unix)
+        if: matrix.platform != 'windows-latest'
         shell: bash
         run: |
           TARGET_DIR="src-tauri/target/${{ matrix.rust_target }}/release"
@@ -167,17 +180,10 @@ jobs:
             TARGET_DIR="src-tauri/target/release"
           fi
           mkdir -p dist-standalone
-
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            cp "$TARGET_DIR/llm-wiki-api.exe" dist-standalone/ 2>/dev/null || true
-            cp "$TARGET_DIR/llm-wiki-ingest.exe" dist-standalone/ 2>/dev/null || true
-            (cd dist-standalone && zip -r llm-wiki-standalone-windows.zip *.exe)
-          else
-            cp "$TARGET_DIR/llm-wiki-api" dist-standalone/
-            cp "$TARGET_DIR/llm-wiki-ingest" dist-standalone/
-            OS_ID=$(echo "${{ matrix.platform }}" | sed 's/-.*//')
-            tar -czf "dist-standalone/llm-wiki-standalone-${OS_ID}.tar.gz" -C dist-standalone llm-wiki-api llm-wiki-ingest
-          fi
+          cp "$TARGET_DIR/llm-wiki-api" dist-standalone/
+          cp "$TARGET_DIR/llm-wiki-ingest" dist-standalone/
+          OS_ID=$(echo "${{ matrix.platform }}" | sed 's/-.*//')
+          tar -czf "dist-standalone/llm-wiki-standalone-${OS_ID}.tar.gz" -C dist-standalone llm-wiki-api llm-wiki-ingest
           ls -la dist-standalone/
 
       - name: Attach standalone binaries to release

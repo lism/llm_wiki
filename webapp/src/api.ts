@@ -1,26 +1,14 @@
 // LLM Wiki API client — fetch + SSE streaming
 
 export interface Project {
-  id: string
-  name: string
-  path: string
-  current: boolean
+  id: string; name: string; path: string; current: boolean
 }
-
 export interface Reference {
-  title: string
-  path: string
-  snippet: string
+  title: string; path: string; snippet: string
 }
-
 export interface ChatResponse {
-  ok: boolean
-  answer?: string
-  error?: string
-  projectId?: string
-  references?: Reference[]
+  ok: boolean; answer?: string; error?: string; projectId?: string; references?: Reference[]
 }
-
 export interface SSECallbacks {
   onToken: (token: string) => void
   onReferences: (refs: Reference[]) => void
@@ -32,156 +20,104 @@ let baseUrl = "http://127.0.0.1:19828"
 let token = ""
 
 export function configure(url: string, t: string) {
-  baseUrl = url.replace(/\/+$/, "")
-  token = t
+  baseUrl = url.replace(/\/+$/, ""); token = t
 }
-
 export function getBaseUrl() { return baseUrl }
 export function getToken() { return token }
 
-function headers(): Record<string, string> {
+function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" }
   if (token) h["Authorization"] = `Bearer ${token}`
   return h
 }
 
-export async function healthCheck(): Promise<{ ok: boolean; status: string; version?: string }> {
-  const resp = await fetch(`${baseUrl}/api/v1/health`)
-  return resp.json()
+export async function healthCheck() {
+  return (await fetch(`${baseUrl}/api/v1/health`)).json()
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const resp = await fetch(`${baseUrl}/api/v1/projects`, { headers: headers() })
-  const data = await resp.json()
-  if (!data.ok) throw new Error(data.error || "Failed to list projects")
-  return data.projects || []
+  const r = await fetch(`${baseUrl}/api/v1/projects`, { headers: authHeaders() })
+  const d = await r.json()
+  if (!d.ok) throw new Error(d.error || "list projects failed")
+  return d.projects || []
 }
 
-export async function chatNonStreaming(
-  projectId: string,
-  query: string,
-): Promise<ChatResponse> {
-  const resp = await fetch(`${baseUrl}/api/v1/projects/${projectId}/chat`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({ query, stream: false }),
-  })
-  return resp.json()
-}
-
-// ── SSE parser ───────────────────────────────────────────────────
-
-interface SSEFrame {
-  event: string
-  data: string
-}
-
-/**
- * Parse a ReadableStream of SSE (Server-Sent Events) text.
- * Yields complete frames as {event, data} objects.
- */
-async function* parseSSE(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal?: AbortSignal,
-): AsyncGenerator<SSEFrame> {
-  const decoder = new TextDecoder()
-  let buffer = ""
-  let currentEvent = ""
-  let dataParts: string[] = []
-
-  while (true) {
-    if (signal?.aborted) break
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() || ""
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith("event: ")) {
-        currentEvent = trimmed.slice(7)
-      } else if (trimmed.startsWith("data: ")) {
-        dataParts.push(trimmed.slice(6))
-      } else if (trimmed === "" && currentEvent) {
-        yield { event: currentEvent, data: dataParts.join("") }
-        currentEvent = ""
-        dataParts = []
-      }
-    }
-  }
-
-  // Flush any remaining partial frame
-  if (currentEvent && dataParts.length > 0) {
-    yield { event: currentEvent, data: dataParts.join("") }
-  }
-}
+// ── SSE streaming ────────────────────────────────────────────────
 
 export function chatStreaming(
   projectId: string,
   query: string,
-  callbacks: SSECallbacks,
+  cb: SSECallbacks,
 ): AbortController {
-  const controller = new AbortController()
-  let finished = false
-
-  function finish() {
-    if (finished) return
-    finished = true
-    callbacks.onDone()
-  }
+  const ctrl = new AbortController()
 
   fetch(`${baseUrl}/api/v1/projects/${projectId}/chat`, {
     method: "POST",
-    headers: headers(),
+    headers: authHeaders(),
     body: JSON.stringify({ query, stream: true }),
-    signal: controller.signal,
-  }).then(async (resp) => {
-    if (!resp.ok || !resp.body) {
-      const text = await resp.text()
-      try {
-        const err = JSON.parse(text)
-        callbacks.onError(err.error || `HTTP ${resp.status}`)
-      } catch {
-        callbacks.onError(`HTTP ${resp.status}: ${text.slice(0, 200)}`)
-      }
-      return
-    }
-
-    const reader = resp.body.getReader()
-    try {
-      for await (const frame of parseSSE(reader, controller.signal)) {
-        try {
-          const parsed = JSON.parse(frame.data)
-          switch (frame.event) {
-            case "token":
-              if (typeof parsed === "string") callbacks.onToken(parsed)
-              break
-            case "references":
-              callbacks.onReferences(parsed as Reference[])
-              break
-            case "done":
-              finish()
-              return
-            case "error":
-              callbacks.onError(typeof parsed === "object" ? parsed.error : String(parsed))
-              return
-          }
-        } catch {
-          // skip unparseable frames
-        }
-      }
-      // Stream ended normally
-      finish()
-    } catch (e: any) {
-      if (e.name === "AbortError") return
-      callbacks.onError(e.message || "Stream read error")
-    }
-  }).catch(e => {
-    if (e.name === "AbortError") return
-    callbacks.onError(e.message || "Connection error")
+    signal: ctrl.signal,
   })
+    .then(async (resp) => {
+      if (!resp.ok) {
+        const t = await resp.text()
+        return cb.onError(`HTTP ${resp.status}: ${t.slice(0, 200)}`)
+      }
+      if (!resp.body) {
+        return cb.onError("Response has no body — SSE requires HTTP streaming")
+      }
 
-  return controller
+      // Simple line-by-line reader
+      const reader = resp.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ""
+      let ev = ""
+      let parts: string[] = []
+
+      function emit() {
+        if (!ev) return
+        const raw = parts.join("")
+        parts = []; const name = ev; ev = ""
+        try {
+          const v = JSON.parse(raw)
+          if (name === "token" && typeof v === "string") cb.onToken(v)
+          else if (name === "references") cb.onReferences(v as Reference[])
+          else if (name === "done") { cb.onDone(); return true }
+          else if (name === "error") { cb.onError(typeof v === "object" ? (v as any).error : String(v)); return true }
+        } catch { /* skip malformed frame */ }
+        return false
+      }
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += dec.decode(value, { stream: true })
+
+          // Process complete lines
+          let nl: number
+          while ((nl = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, nl).trim()
+            buf = buf.slice(nl + 1)
+
+            if (line.startsWith("event: ")) {
+              ev = line.slice(7)
+            } else if (line.startsWith("data: ")) {
+              parts.push(line.slice(6))
+            } else if (line === "" && ev) {
+              if (emit()) return  // done/error
+            }
+          }
+        }
+        // Stream ended — flush and complete
+        if (ev) emit()
+        cb.onDone()
+      } catch (e: any) {
+        if (e.name !== "AbortError") cb.onError(e.message || "Stream error")
+      }
+    })
+    .catch((e) => {
+      if (e.name !== "AbortError") cb.onError(e.message || "Network error")
+    })
+
+  return ctrl
 }

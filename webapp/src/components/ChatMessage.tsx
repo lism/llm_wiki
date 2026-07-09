@@ -10,10 +10,16 @@ interface Props {
   isStreaming?: boolean
 }
 
+/** Strip hidden citation comment from the LLM response. */
+function cleanContent(text: string): string {
+  return text.replace(/<!--\s*cited:[\s\d,]*-->/gi, "").trim()
+}
+
 export function ChatMessage({ message, isStreaming }: Props) {
   const [refsOpen, setRefsOpen] = useState(false)
   const isUser = message.role === "user"
   const hasRefs = !isUser && message.references && message.references.length > 0
+  const displayContent = isUser ? message.content : cleanContent(message.content)
 
   return (
     <div className={`flex gap-3 ${isUser ? "justify-end" : ""}`}>
@@ -40,7 +46,7 @@ export function ChatMessage({ message, isStreaming }: Props) {
           `}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <p className="whitespace-pre-wrap">{displayContent}</p>
           ) : (
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown
@@ -48,7 +54,6 @@ export function ChatMessage({ message, isStreaming }: Props) {
                 rehypePlugins={[rehypeKatex]}
                 components={{
                   a({ href, children }) {
-                    // Render [[wikilinks]] as bold text (link target doesn't exist in webapp)
                     if (href?.startsWith("[[")) {
                       const text = (href || "").replace(/^\[\[|\]\]$/g, "")
                       return <strong className="text-blue-600 dark:text-blue-400">{text}</strong>
@@ -57,7 +62,7 @@ export function ChatMessage({ message, isStreaming }: Props) {
                   },
                 }}
               >
-                {message.content}
+                {displayContent}
               </ReactMarkdown>
             </div>
           )}
