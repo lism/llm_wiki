@@ -473,12 +473,12 @@ pub enum StreamEvent {
 }
 
 /// Provider-specific streaming config.
-struct ProviderStreamConfig {
-    url: String,
-    headers: Vec<(String, String)>,
-    body_json: Value,
+pub struct ProviderStreamConfig {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body_json: Value,
     /// Parse one SSE / JSON-lines chunk, returning tokens.
-    parse_line: fn(&str) -> Option<String>,
+    pub parse_line: fn(&str) -> Option<String>,
 }
 
 fn build_provider_config(
@@ -954,6 +954,27 @@ async fn stream_llm(
 
     events.push(StreamEvent::Done);
     Ok((answer, events))
+}
+
+// ── public helpers for ingest ─────────────────────────────────────
+
+/// Build a `ProviderStreamConfig` for a raw system + user prompt pair.
+/// Used by the ingest pipeline (and any other callers that just want
+/// to call the LLM without the chat-agent search/context assembly).
+pub fn build_provider_config_for_ingest(
+    config: &ChatLlmConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<ProviderStreamConfig, String> {
+    build_provider_config(config, system_prompt, user_prompt)
+}
+
+/// Stream an LLM call and return the complete collected response text
+/// plus all stream events.  Used by non-chat callers (ingest, etc.).
+pub async fn stream_llm_raw(
+    cfg: &ProviderStreamConfig,
+) -> Result<(String, Vec<StreamEvent>), String> {
+    stream_llm(cfg).await
 }
 
 // ── tests ─────────────────────────────────────────────────────────

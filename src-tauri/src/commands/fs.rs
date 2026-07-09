@@ -360,6 +360,32 @@ pub(crate) fn pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, String
 /// Lock: delegates to `extract_pdf_markdown`, which acquires the
 /// pdfium lock internally. We must NOT take it here too —
 /// `std::sync::Mutex` is non-reentrant.
+/// Synchronous file preprocessing — usable from standalone binaries
+/// that don't have a Tauri async runtime.
+pub fn preprocess_file_sync(path: &str) -> Result<String, String> {
+    let p = Path::new(path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let text = match ext.as_str() {
+        "pdf" => extract_pdf_text(path, false)?,
+        e if OFFICE_EXTS.contains(&e) => extract_office_text(path, e)?,
+        _ => return Ok("no preprocessing needed".to_string()),
+    };
+
+    // Write cache
+    let cache_path = cache_path_for(p);
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&cache_path, &text);
+
+    Ok(text)
+}
+
 fn extract_pdf_text(path: &str, include_images: bool) -> Result<String, String> {
     use crate::commands::extract_images::{extract_pdf_markdown, ExtractOptions};
 

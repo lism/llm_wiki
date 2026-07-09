@@ -1,7 +1,7 @@
 pub mod api_context;
 pub mod api_server;
 mod clip_server;
-mod commands;
+pub mod commands;
 mod cors;
 mod panic_guard;
 mod proxy;
