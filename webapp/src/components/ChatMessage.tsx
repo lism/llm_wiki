@@ -47,6 +47,8 @@ export function ChatMessage({ message, isStreaming }: Props) {
         >
           {isUser ? (
             <p className="whitespace-pre-wrap">{displayContent}</p>
+          ) : isStreaming ? (
+            <p className="whitespace-pre-wrap">{displayContent}</p>
           ) : (
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown
