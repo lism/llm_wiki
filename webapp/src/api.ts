@@ -69,12 +69,68 @@ export async function chatNonStreaming(
   return resp.json()
 }
 
+// ── SSE parser ───────────────────────────────────────────────────
+
+interface SSEFrame {
+  event: string
+  data: string
+}
+
+/**
+ * Parse a ReadableStream of SSE (Server-Sent Events) text.
+ * Yields complete frames as {event, data} objects.
+ */
+async function* parseSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<SSEFrame> {
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let currentEvent = ""
+  let dataParts: string[] = []
+
+  while (true) {
+    if (signal?.aborted) break
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split("\n")
+    buffer = lines.pop() || ""
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith("event: ")) {
+        currentEvent = trimmed.slice(7)
+      } else if (trimmed.startsWith("data: ")) {
+        dataParts.push(trimmed.slice(6))
+      } else if (trimmed === "" && currentEvent) {
+        yield { event: currentEvent, data: dataParts.join("") }
+        currentEvent = ""
+        dataParts = []
+      }
+    }
+  }
+
+  // Flush any remaining partial frame
+  if (currentEvent && dataParts.length > 0) {
+    yield { event: currentEvent, data: dataParts.join("") }
+  }
+}
+
 export function chatStreaming(
   projectId: string,
   query: string,
   callbacks: SSECallbacks,
 ): AbortController {
   const controller = new AbortController()
+  let finished = false
+
+  function finish() {
+    if (finished) return
+    finished = true
+    callbacks.onDone()
+  }
 
   fetch(`${baseUrl}/api/v1/projects/${projectId}/chat`, {
     method: "POST",
@@ -94,61 +150,37 @@ export function chatStreaming(
     }
 
     const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ""
-    let currentEvent = ""
-    let dataParts: string[] = []
-
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
-        const lines = buffer.split("\n")
-        buffer = lines.pop() || ""
-
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (trimmed.startsWith("event: ")) {
-            currentEvent = trimmed.slice(7)
-          } else if (trimmed.startsWith("data: ")) {
-            dataParts.push(trimmed.slice(6))
-          } else if (trimmed === "" && currentEvent) {
-            const raw = dataParts.join("")
-            dataParts = []
-            try {
-              const parsed = JSON.parse(raw)
-              switch (currentEvent) {
-                case "token":
-                  if (typeof parsed === "string") callbacks.onToken(parsed)
-                  break
-                case "references":
-                  callbacks.onReferences(parsed as Reference[])
-                  break
-                case "done":
-                  callbacks.onDone()
-                  return
-                case "error":
-                  callbacks.onError(typeof parsed === "object" ? parsed.error : String(parsed))
-                  return
-              }
-            } catch {
-              // skip unparseable frames
-            }
-            currentEvent = ""
+      for await (const frame of parseSSE(reader, controller.signal)) {
+        try {
+          const parsed = JSON.parse(frame.data)
+          switch (frame.event) {
+            case "token":
+              if (typeof parsed === "string") callbacks.onToken(parsed)
+              break
+            case "references":
+              callbacks.onReferences(parsed as Reference[])
+              break
+            case "done":
+              finish()
+              return
+            case "error":
+              callbacks.onError(typeof parsed === "object" ? parsed.error : String(parsed))
+              return
           }
+        } catch {
+          // skip unparseable frames
         }
       }
+      // Stream ended normally
+      finish()
     } catch (e: any) {
-      if (e.name !== "AbortError") {
-        callbacks.onError(e.message || "Stream read error")
-      }
+      if (e.name === "AbortError") return
+      callbacks.onError(e.message || "Stream read error")
     }
   }).catch(e => {
-    if (e.name !== "AbortError") {
-      callbacks.onError(e.message || "Connection error")
-    }
+    if (e.name === "AbortError") return
+    callbacks.onError(e.message || "Connection error")
   })
 
   return controller
