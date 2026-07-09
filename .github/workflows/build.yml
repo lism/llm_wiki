@@ -15,15 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: '--target aarch64-apple-darwin'
-            rust_target: aarch64-apple-darwin
           - platform: ubuntu-22.04
-            args: ''
-            rust_target: ''
-          # GitHub-hosted ARM Linux runner (free for public repos
-          # since 2024). Native build — no cross-compile of webkit2gtk.
-          - platform: ubuntu-22.04-arm
             args: ''
             rust_target: ''
           - platform: windows-latest
@@ -53,10 +45,6 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Install protoc (macOS)
-        if: startsWith(matrix.platform, 'macos-')
-        run: brew install protobuf
-
       - name: Install dependencies (Ubuntu)
         if: startsWith(matrix.platform, 'ubuntu-22.04')
         run: |
@@ -67,27 +55,6 @@ jobs:
           # the ARM64 image — list it explicitly so both arches
           # bundle cleanly regardless of future image drift.
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf protobuf-compiler xdg-utils
-
-      # The repo ships pre-downloaded PDFium binaries under
-      # src-tauri/pdfium/ for every supported architecture
-      # (libpdfium.so = Linux x86_64, libpdfium-arm64.so = Linux aarch64,
-      # libpdfium.dylib = macOS arm64, pdfium.dll = Windows).
-      # For architectures whose bundled filename must
-      # stay `libpdfium.*`, swap the matching binary into place before cargo
-      # runs. We do NOT pull from bblanchon/pdfium-binaries during CI — that
-      # download has historically failed often enough that committing the
-      # binaries is the maintenance-friendly path.
-      - name: Verify PDFium binary checksums
-        if: matrix.platform != 'windows-latest'
-        run: shasum -a 256 -c src-tauri/pdfium/SHA256SUMS
-
-      # rust_target is empty for both Ubuntu rows, so platform is the
-      # only stable discriminator for the Linux ARM swap.
-      - name: Use ARM64 pdfium binary (Ubuntu ARM only)
-        if: matrix.platform == 'ubuntu-22.04-arm'
-        run: |
-          cp src-tauri/pdfium/libpdfium-arm64.so src-tauri/pdfium/libpdfium.so
-          file src-tauri/pdfium/libpdfium.so
 
       - name: Install protoc (Windows)
         if: matrix.platform == 'windows-latest'
