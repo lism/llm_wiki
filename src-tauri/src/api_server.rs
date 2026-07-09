@@ -9,14 +9,14 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
+use crate::api_context::{ApiContext, ProjectEntry};
 use crate::commands::chat;
 use crate::commands::search::SearchEmbeddingConfig;
 use crate::cors::{local_cors_headers, request_origin};
-use crate::{clip_server, commands, server_bind};
+use crate::{commands, server_bind};
 
 const PORT: u16 = 19828;
 const API_PREFIX: &str = "/api/v1";
@@ -63,10 +63,10 @@ pub fn invalidate_config_cache() {
     }
 }
 
-pub fn start_api_server(app: AppHandle) {
+pub fn start_api_server(ctx: std::sync::Arc<ApiContext>) {
     thread::spawn(move || loop {
         API_STATUS.store(0, Ordering::Relaxed);
-        let (server, addr) = match bind_server_with_retry(&app) {
+        let (server, addr) = match bind_server_with_retry(&ctx) {
             Some(bound) => bound,
             None => {
                 API_STATUS.store(2, Ordering::Relaxed);
@@ -90,11 +90,11 @@ pub fn start_api_server(app: AppHandle) {
                 respond_error(request, 503, "API server is busy", origin.as_deref());
                 continue;
             };
-            let app = app.clone();
+            let ctx = std::sync::Arc::clone(&ctx);
             thread::spawn(move || {
                 let _slot = slot;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_request(app, request);
+                    process_request(ctx, request);
                 }));
                 if let Err(payload) = result {
                     eprintln!("[API Server] request handler panicked: {payload:?}");
@@ -108,8 +108,8 @@ pub fn start_api_server(app: AppHandle) {
     });
 }
 
-fn bind_server_with_retry(app: &AppHandle) -> Option<(Server, String)> {
-    let host = server_bind::configured_bind_host(app);
+fn bind_server_with_retry(ctx: &ApiContext) -> Option<(Server, String)> {
+    let host = ctx.configured_bind_host();
     let addr = server_bind::bind_addr(&host, PORT);
     for attempt in 1..=MAX_BIND_RETRIES {
         match Server::http(&addr) {
@@ -153,7 +153,7 @@ fn try_acquire_request_slot() -> Option<RequestSlot> {
     }
 }
 
-fn process_request(app: AppHandle, mut request: tiny_http::Request) {
+fn process_request(ctx: std::sync::Arc<ApiContext>, mut request: tiny_http::Request) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let origin = request_origin(&request);
@@ -182,7 +182,7 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
     };
 
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_request(&app, &method, &url, &body, &headers)
+        handle_request(&ctx, &method, &url, &body, &headers)
     }))
     .unwrap_or_else(|payload| {
         eprintln!("[API Server] request panicked: {payload:?}");
@@ -225,7 +225,7 @@ fn err(status: u16, message: impl Into<String>) -> ApiResponse {
 }
 
 fn handle_request(
-    app: &AppHandle,
+    ctx: &ApiContext,
     method: &Method,
     url: &str,
     body: &str,
@@ -242,19 +242,19 @@ fn handle_request(
             "ok": true,
             "status": get_api_status(),
             "version": env!("CARGO_PKG_VERSION"),
-            "authRequired": api_auth_required(app),
-            "authConfigured": api_token(app).is_some(),
-            "tokenSource": api_token_source(app),
-            "enabled": api_enabled(app),
-            "mcpEnabled": api_mcp_enabled(app),
-            "allowUnauthenticated": api_allow_unauthenticated(app),
-            "allowLanAccess": api_allow_lan_access(app),
+            "authRequired": ctx.api_allow_unauthenticated() == false,
+            "authConfigured": ctx.api_token().is_some(),
+            "tokenSource": ctx.api_token_source(),
+            "enabled": ctx.api_enabled(),
+            "mcpEnabled": ctx.api_mcp_enabled(),
+            "allowUnauthenticated": ctx.api_allow_unauthenticated(),
+            "allowLanAccess": ctx.api_allow_lan_access(),
         }));
     }
     if !path.starts_with(API_PREFIX) {
         return err(404, "Not found");
     }
-    if !api_enabled(app) {
+    if !ctx.api_enabled() {
         // Kill-switch path: token may be configured and valid, but the
         // user toggled the API off in Settings → API Server. 503 is
         // the right code semantically ("temporarily unavailable")
@@ -262,7 +262,7 @@ fn handle_request(
         // retry instantly the way 401 would.
         return err(503, "API server is disabled in Settings → API Server");
     }
-    if !is_authorized(app, query, headers) {
+    if !is_authorized(ctx, query, headers) {
         return err(401, "Unauthorized");
     }
     if !matches!(method, &Method::Get | &Method::Post | &Method::Patch) {
@@ -277,31 +277,31 @@ fn handle_request(
         .collect();
 
     match (method, parts.as_slice()) {
-        (&Method::Get, ["projects"]) => handle_projects(app),
-        (&Method::Get, ["projects", project_id, "files"]) => handle_files(app, project_id, query),
+        (&Method::Get, ["projects"]) => handle_projects(ctx),
+        (&Method::Get, ["projects", project_id, "files"]) => handle_files(ctx, project_id, query),
         (&Method::Get, ["projects", project_id, "files", "content"]) => {
-            handle_file_content(app, project_id, query)
+            handle_file_content(ctx, project_id, query)
         }
         (&Method::Get, ["projects", project_id, "reviews"]) => {
-            handle_reviews(app, project_id, query)
+            handle_reviews(ctx, project_id, query)
         }
         (&Method::Post, ["projects", project_id, "reviews", "resolve"]) => {
-            handle_bulk_resolve_reviews(app, project_id, body)
+            handle_bulk_resolve_reviews(ctx, project_id, body)
         }
         (&Method::Patch, ["projects", project_id, "reviews", review_id]) => {
-            handle_patch_review(app, project_id, review_id, body)
+            handle_patch_review(ctx, project_id, review_id, body)
         }
-        (&Method::Post, ["projects", project_id, "search"]) => handle_search(app, project_id, body),
-        (&Method::Get, ["projects", project_id, "graph"]) => handle_graph(app, project_id, query),
+        (&Method::Post, ["projects", project_id, "search"]) => handle_search(ctx, project_id, body),
+        (&Method::Get, ["projects", project_id, "graph"]) => handle_graph(ctx, project_id, query),
         (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
-            handle_rescan(app, project_id)
+            handle_rescan(ctx, project_id)
         }
         (&Method::Post, ["projects", project_id, "chat"]) => {
-            let _project = match resolve_project(app, project_id) {
+            let _project = match resolve_project(ctx, project_id) {
                 Ok(p) => p,
                 Err(e) => return err(404, e),
             };
-            let app_state = load_app_state(app).unwrap_or_default();
+            let app_state = load_app_state(ctx).unwrap_or_default();
             let Some(llm_config) = chat::resolve_llm_config(&app_state) else {
                 return err(
                     400,
@@ -315,7 +315,7 @@ fn handle_request(
             if req.query.trim().is_empty() {
                 return err(400, "query is required");
             }
-            let embedding_config = load_embedding_config(app);
+            let embedding_config = ctx.load_embedding_config();
 
             if req.stream {
                 // Signal to process_request that this is a streaming response.
@@ -330,7 +330,7 @@ fn handle_request(
             }
 
             // Non-streaming: block on the full response.
-            match tauri::async_runtime::block_on(chat::run_chat_query(
+            match ctx.tokio_handle.block_on(chat::run_chat_query(
                 &_project.path,
                 &req.query,
                 &llm_config,
@@ -450,11 +450,11 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn is_authorized(app: &AppHandle, query: &str, headers: &[(String, String)]) -> bool {
-    if !api_auth_required(app) {
+fn is_authorized(ctx: &ApiContext, query: &str, headers: &[(String, String)]) -> bool {
+    if ctx.api_allow_unauthenticated() {
         return true;
     }
-    let Some(token) = api_token(app) else {
+    let Some(token) = ctx.api_token() else {
         return false;
     };
     let params = parse_query(query);
@@ -479,99 +479,6 @@ fn is_authorized(app: &AppHandle, query: &str, headers: &[(String, String)]) -> 
     })
 }
 
-fn api_token(app: &AppHandle) -> Option<String> {
-    if let Ok(token) = std::env::var("LLM_WIKI_API_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    let parsed = load_app_state(app)?;
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("token"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn api_token_source(app: &AppHandle) -> &'static str {
-    if let Ok(token) = std::env::var("LLM_WIKI_API_TOKEN") {
-        if !token.trim().is_empty() {
-            return "env";
-        }
-    }
-    if load_app_state(app)
-        .and_then(|parsed| {
-            parsed
-                .get("apiConfig")
-                .and_then(|v| v.get("token"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|_| ())
-        })
-        .is_some()
-    {
-        return "store";
-    }
-    "none"
-}
-
-fn api_auth_required(app: &AppHandle) -> bool {
-    !api_allow_unauthenticated(app)
-}
-
-fn api_allow_unauthenticated(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("allowUnauthenticated"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn api_allow_lan_access(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("allowLanAccess"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-/// Whether the API server should accept non-/health requests.
-///
-/// Defaults to `true` when no config has been written yet — keeps
-/// existing setups (env-token-only, hand-edited app-state.json) working
-/// after the kill-switch was introduced. New users still land in
-/// "enabled + no token = 401" which is fail-closed by virtue of the
-/// missing token, not the enable flag.
-fn api_enabled(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return true;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-}
-
-fn api_mcp_enabled(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("mcpEnabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let max_len = left.len().max(right.len());
     let mut diff = left.len() ^ right.len();
@@ -583,7 +490,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn load_app_state(app: &AppHandle) -> Option<Value> {
+fn load_app_state(ctx: &ApiContext) -> Option<Value> {
     let now = Instant::now();
     let lock = APP_STATE_CACHE.get_or_init(|| Mutex::new(None));
     let mut previous = None;
@@ -596,7 +503,7 @@ fn load_app_state(app: &AppHandle) -> Option<Value> {
         }
     }
 
-    let path = app.path().app_data_dir().ok()?.join("app-state.json");
+    let path = ctx.data_dir.join("app-state.json");
     let loaded = fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
@@ -619,8 +526,8 @@ struct ProjectEntry {
     current: bool,
 }
 
-fn handle_projects(app: &AppHandle) -> ApiResponse {
-    let projects = load_projects(app);
+fn handle_projects(ctx: &ApiContext) -> ApiResponse {
+    let projects = load_projects(ctx);
     let current_project = projects.iter().find(|project| project.current).cloned();
     ok(json!({
         "ok": true,
@@ -629,11 +536,14 @@ fn handle_projects(app: &AppHandle) -> ApiResponse {
     }))
 }
 
-fn load_projects(app: &AppHandle) -> Vec<ProjectEntry> {
-    let current = normalize_path(&clip_server::current_project_path());
+fn load_projects(ctx: &ApiContext) -> Vec<ProjectEntry> {
+    let current = {
+        let guard = ctx.current_project.lock().unwrap();
+        normalize_path(&guard.clone().unwrap_or_default())
+    };
     let mut by_path: BTreeMap<String, ProjectEntry> = BTreeMap::new();
 
-    if let Some(parsed) = load_app_state(app) {
+    if let Some(parsed) = load_app_state(ctx) {
         if let Some(registry) = parsed.get("projectRegistry").and_then(Value::as_object) {
             for (id, value) in registry {
                 let path = value.get("path").and_then(Value::as_str).unwrap_or("");
@@ -682,7 +592,12 @@ fn load_projects(app: &AppHandle) -> Vec<ProjectEntry> {
         }
     }
 
-    for (name, path) in clip_server::all_projects() {
+    // Supplement from in-memory project registry
+    let extra: Vec<(String, String)> = {
+        let guard = ctx.projects.lock().unwrap();
+        guard.iter().map(|e| (e.name.clone(), e.path.clone())).collect()
+    };
+    for (name, path) in extra {
         let path = normalize_path(&path);
         by_path.entry(path.clone()).or_insert_with(|| ProjectEntry {
             id: read_project_id(&path).unwrap_or_else(|| path.clone()),
@@ -710,10 +625,10 @@ fn load_projects(app: &AppHandle) -> Vec<ProjectEntry> {
     by_path.into_values().collect()
 }
 
-fn resolve_project(app: &AppHandle, project_id: &str) -> Result<ProjectEntry, String> {
+fn resolve_project(ctx: &ApiContext, project_id: &str) -> Result<ProjectEntry, String> {
     let project_id = percent_decode(project_id);
     let wants_current = project_id.eq_ignore_ascii_case("current");
-    load_projects(app)
+    load_projects(ctx)
         .into_iter()
         .find(|p| {
             p.id == project_id
@@ -754,8 +669,8 @@ fn normalize_path(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_string()
 }
 
-fn handle_files(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_files(ctx: &ApiContext, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -805,8 +720,8 @@ fn handle_files(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
     }
 }
 
-fn handle_file_content(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_file_content(ctx: &ApiContext, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1402,8 +1317,8 @@ fn copy_review_options(item: &Value, out: &mut Map<String, Value>) {
     out.insert("options".to_string(), Value::Array(options));
 }
 
-fn handle_reviews(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_reviews(ctx: &ApiContext, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1439,12 +1354,12 @@ struct PatchReviewRequest {
 /// single review item's resolved state. Body `{ resolved?, action? }`;
 /// an empty body resolves the item (resolved defaults to true).
 fn handle_patch_review(
-    app: &AppHandle,
+    ctx: &ApiContext,
     project_id: &str,
     review_id: &str,
     body: &str,
 ) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1486,8 +1401,8 @@ struct BulkResolveRequest {
 /// normal, so this returns 200 with `{ resolved, notFound, count }`
 /// rather than 404 — 404 is reserved for the single-item PATCH where
 /// one unknown id is the entire request.
-fn handle_bulk_resolve_reviews(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_bulk_resolve_reviews(ctx: &ApiContext, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1653,8 +1568,8 @@ struct SearchRequest {
     query_embedding: Option<Vec<f32>>,
 }
 
-fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_search(ctx: &ApiContext, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1668,15 +1583,15 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
     let top_k = req.top_k.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS);
     let query = req.query;
     let query_embedding =
-        match tauri::async_runtime::block_on(commands::search::resolve_query_embedding(
+        match ctx.tokio_handle.block_on(commands::search::resolve_query_embedding(
             &query,
             req.query_embedding,
-            load_embedding_config(app),
+            ctx.load_embedding_config(),
         )) {
             Ok(embedding) => embedding,
             Err(e) => return err(400, e),
         };
-    match tauri::async_runtime::block_on(commands::search::search_project_inner(
+    match ctx.tokio_handle.block_on(commands::search::search_project_inner(
         project.path.clone(),
         query,
         top_k,
@@ -1694,12 +1609,6 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
         })),
         Err(e) => err(500, e),
     }
-}
-
-fn load_embedding_config(app: &AppHandle) -> Option<commands::search::SearchEmbeddingConfig> {
-    let parsed = load_app_state(app)?;
-    let value = parsed.get("embeddingConfig")?.clone();
-    serde_json::from_value::<commands::search::SearchEmbeddingConfig>(value).ok()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1720,8 +1629,8 @@ struct ApiGraphEdge {
     weight: f64,
 }
 
-fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
+fn handle_graph(ctx: &ApiContext, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(ctx, project_id) {
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
@@ -1868,53 +1777,10 @@ fn resolve_link(raw: &str, ids: &BTreeSet<String>) -> Option<String> {
         .cloned()
 }
 
-fn handle_rescan(app: &AppHandle, project_id: &str) -> ApiResponse {
-    let project = match resolve_project(app, project_id) {
-        Ok(project) => project,
-        Err(e) => return err(404, e),
-    };
-    let source_watch_config = load_source_watch_config(app, &project.id);
-    match commands::file_sync::rescan_project_files(
-        app.clone(),
-        project.id.clone(),
-        project.path.clone(),
-        source_watch_config,
-    ) {
-        Ok(result) => ok(json!({ "ok": true, "projectId": project.id, "result": result })),
-        Err(e) => err(500, e),
-    }
-}
-
-fn load_source_watch_config(
-    app: &AppHandle,
-    project_id: &str,
-) -> Option<commands::file_sync::SourceWatchConfig> {
-    let parsed = load_app_state(app)?;
-    let settings = parsed.get("sourceWatchConfig").and_then(Value::as_object);
-    if let Some(value) = settings
-        .and_then(|s| s.get(project_id).or_else(|| s.get("default")))
-        .cloned()
-    {
-        if let Ok(config) = serde_json::from_value::<commands::file_sync::SourceWatchConfig>(value)
-        {
-            return Some(config);
-        }
-    }
-    let legacy_enabled = parsed
-        .get("projectFileSyncEnabled")
-        .and_then(Value::as_object)
-        .and_then(|settings| {
-            settings
-                .get(project_id)
-                .or_else(|| settings.get("default"))
-                .and_then(Value::as_bool)
-        });
-    legacy_enabled.and_then(|enabled| {
-        serde_json::from_value::<commands::file_sync::SourceWatchConfig>(
-            json!({ "enabled": enabled }),
-        )
-        .ok()
-    })
+fn handle_rescan(ctx: &ApiContext, project_id: &str) -> ApiResponse {
+    // Source rescan requires the Tauri AppHandle for FileSyncState
+    // access. In the standalone binary this returns a 501.
+    err(501, "Source rescan is not available in the standalone API server. Use the desktop app or re-import files manually.")
 }
 
 /// Build an ApiResponse that tells `process_request` to serve an SSE

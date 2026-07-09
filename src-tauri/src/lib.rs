@@ -1,4 +1,5 @@
-mod api_server;
+pub mod api_context;
+pub mod api_server;
 mod clip_server;
 mod commands;
 mod cors;
@@ -8,8 +9,9 @@ mod server_bind;
 mod tray;
 mod types;
 
+use api_context::ApiContext;
 use panic_guard::run_guarded;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 struct CloseBehaviorState(Mutex<String>);
@@ -182,10 +184,19 @@ pub fn run() {
             app.manage(commands::file_sync::FileSyncState::default());
             app.manage(CloseBehaviorState(Mutex::new("minimize".to_string())));
             app.manage(TrayAvailabilityState(Mutex::new(false)));
+            // Build the shared API context from the Tauri AppHandle.
+            let api_ctx = Arc::new(ApiContext::new(
+                app.path()
+                    .app_data_dir()
+                    .unwrap_or_default(),
+                Some(app.path().resource_dir().unwrap_or_default()),
+                tokio::runtime::Handle::current(),
+            ));
+
             // Start the API before optional desktop integrations so the
             // backend is reachable if tray setup or another integration fails.
             clip_server::start_clip_server(app.handle().clone());
-            api_server::start_api_server(app.handle().clone());
+            api_server::start_api_server(api_ctx);
             let tray_available = match tray::create_tray(app.handle()) {
                 Ok(()) => true,
                 Err(err) => {
