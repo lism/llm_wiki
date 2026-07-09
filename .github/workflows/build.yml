@@ -149,6 +149,46 @@ jobs:
           prerelease: ${{ steps.release_meta.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }}
 
+      - name: Build standalone binaries
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            cargo build --release --bin llm-wiki-api --bin llm-wiki-ingest --target "${{ matrix.rust_target }}"
+          else
+            cargo build --release --bin llm-wiki-api --bin llm-wiki-ingest
+          fi
+
+      - name: Package standalone binaries
+        shell: bash
+        run: |
+          TARGET_DIR="src-tauri/target/${{ matrix.rust_target }}/release"
+          if [ -z "${{ matrix.rust_target }}" ]; then
+            TARGET_DIR="src-tauri/target/release"
+          fi
+          mkdir -p dist-standalone
+
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            cp "$TARGET_DIR/llm-wiki-api.exe" dist-standalone/ 2>/dev/null || true
+            cp "$TARGET_DIR/llm-wiki-ingest.exe" dist-standalone/ 2>/dev/null || true
+            (cd dist-standalone && zip -r llm-wiki-standalone-windows.zip *.exe)
+          else
+            cp "$TARGET_DIR/llm-wiki-api" dist-standalone/
+            cp "$TARGET_DIR/llm-wiki-ingest" dist-standalone/
+            OS_ID=$(echo "${{ matrix.platform }}" | sed 's/-.*//')
+            tar -czf "dist-standalone/llm-wiki-standalone-${OS_ID}.tar.gz" -C dist-standalone llm-wiki-api llm-wiki-ingest
+          fi
+          ls -la dist-standalone/
+
+      - name: Attach standalone binaries to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for f in dist-standalone/llm-wiki-standalone-*; do
+            [ -f "$f" ] && gh release upload "${{ steps.release_meta.outputs.tag_name }}" "$f" --clobber
+          done
+
       - name: Package Windows portable zip
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -181,6 +221,7 @@ jobs:
             src-tauri/target/**/release/bundle/deb/*.deb
             src-tauri/target/**/release/bundle/appimage/*.AppImage
             dist-portable/*.zip
+            dist-standalone/*
           if-no-files-found: warn
           retention-days: 14
 
