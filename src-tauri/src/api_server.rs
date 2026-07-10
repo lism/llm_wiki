@@ -620,12 +620,18 @@ fn load_projects(ctx: &ApiContext) -> Vec<ProjectEntry> {
 fn resolve_project(ctx: &ApiContext, project_id: &str) -> Result<ProjectEntry, String> {
     let project_id = percent_decode(project_id);
     let wants_current = project_id.eq_ignore_ascii_case("current");
-    load_projects(ctx)
-        .into_iter()
+    let all = load_projects(ctx);
+
+    all.iter()
         .find(|p| {
             p.id == project_id
                 || project_path_matches(&p.path, &project_id)
                 || (wants_current && p.current)
+        })
+        .cloned()
+        // Fallback: "current" with no marked-current project → first project
+        .or_else(|| {
+            if wants_current { all.into_iter().next() } else { None }
         })
         .ok_or_else(|| format!("Unknown project: {project_id}"))
 }
