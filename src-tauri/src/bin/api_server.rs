@@ -100,19 +100,19 @@ fn dirs_fallback() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join("Library/Application Support/com.llm-wiki.app")
+        PathBuf::from(home).join("Library/Application Support/com.llmwiki.app")
     }
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".local/share/llm-wiki")
+        PathBuf::from(home).join(".local/share/com.llmwiki.app")
     }
     #[cfg(target_os = "windows")]
     {
         std::env::var("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join("llm-wiki")
+            .join("com.llmwiki.app")
     }
 }
 
