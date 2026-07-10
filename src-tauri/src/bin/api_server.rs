@@ -88,7 +88,7 @@ fn main() {
     // Run the event loop on the tokio runtime so the async background
     // work (SSE chat, vector search, …) has a reactor to drive.
     let _guard = rt.enter();
-    api_server::start_api_server(ctx);
+    api_server::start_api_server(ctx, port);
 
     // Block forever — start_api_server spawns a background thread
     // that owns the server loop. The main thread parks here so the

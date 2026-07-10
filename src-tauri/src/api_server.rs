@@ -63,10 +63,10 @@ pub fn invalidate_config_cache() {
     }
 }
 
-pub fn start_api_server(ctx: std::sync::Arc<ApiContext>) {
+pub fn start_api_server(ctx: std::sync::Arc<ApiContext>, port: u16) {
     thread::spawn(move || loop {
         API_STATUS.store(0, Ordering::Relaxed);
-        let (server, addr) = match bind_server_with_retry(&ctx) {
+        let (server, addr) = match bind_server_with_retry(&ctx, port) {
             Some(bound) => bound,
             None => {
                 API_STATUS.store(2, Ordering::Relaxed);
@@ -108,9 +108,9 @@ pub fn start_api_server(ctx: std::sync::Arc<ApiContext>) {
     });
 }
 
-fn bind_server_with_retry(ctx: &ApiContext) -> Option<(Server, String)> {
+fn bind_server_with_retry(ctx: &ApiContext, port: u16) -> Option<(Server, String)> {
     let host = ctx.configured_bind_host();
-    let addr = server_bind::bind_addr(&host, PORT);
+    let addr = server_bind::bind_addr(&host, port);
     for attempt in 1..=MAX_BIND_RETRIES {
         match Server::http(&addr) {
             Ok(server) => return Some((server, addr)),

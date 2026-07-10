@@ -196,7 +196,7 @@ pub fn run() {
             // Start the API before optional desktop integrations so the
             // backend is reachable if tray setup or another integration fails.
             clip_server::start_clip_server(app.handle().clone());
-            api_server::start_api_server(api_ctx);
+            api_server::start_api_server(api_ctx, 19828);
             let tray_available = match tray::create_tray(app.handle()) {
                 Ok(()) => true,
                 Err(err) => {
