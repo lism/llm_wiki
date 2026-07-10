@@ -502,9 +502,8 @@ async fn llm_collect(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String, String> {
-    // Build a messages array with system + user.
-    // Reuse the chat module's provider dispatch but collect all tokens.
     let provider = chat::build_provider_config_for_ingest(config, system_prompt, user_prompt)?;
+    eprintln!("  calling LLM: {} {} ({})", config.provider, config.model, provider.url);
     let (answer, _events) = chat::stream_llm_raw(&provider).await?;
     Ok(answer)
 }
@@ -561,17 +560,21 @@ pub async fn run_ingest(
     let summary_path = format!("wiki/sources/{summary_slug}.md");
 
     // 5. Step 1: Analysis
+    eprintln!("  step 1/2: analyzing ({} chars)...", content.len());
     let analysis_prompt = build_analysis_prompt(
         &purpose, &index, &schema, &content, folder_context,
     );
+    let t0 = std::time::Instant::now();
     let analysis = llm_collect(
         config,
         &analysis_prompt,
         &format!("Source file: {file_name}\n\n{content}"),
     )
     .await?;
+    eprintln!("  analysis done ({:.1}s, {} chars)", t0.elapsed().as_secs_f64(), analysis.len());
 
     // 6. Step 2: Generation
+    eprintln!("  step 2/2: generating...");
     let generation_prompt = build_generation_prompt(
         &schema, &purpose, &index, &overview, file_name, &content, &summary_path,
     );
@@ -579,7 +582,9 @@ pub async fn run_ingest(
         "## Analysis of source\n\n{analysis}\n\n\
          ## Source content\n\n{content}",
     );
+    let t0 = std::time::Instant::now();
     let generation = llm_collect(config, &generation_prompt, &gen_input).await?;
+    eprintln!("  generation done ({:.1}s, {} chars)", t0.elapsed().as_secs_f64(), generation.len());
 
     // 7. Parse FILE blocks
     let (blocks, warnings) = parse_file_blocks(&generation);

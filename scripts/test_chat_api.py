@@ -46,7 +46,7 @@ class ChatApiTester:
     def __init__(self, base_url: str, token: str):
         parsed = urlparse(base_url)
         self.host = parsed.hostname or "127.0.0.1"
-        self.port = parsed.port or 19828
+        self.port = parsed.port or 19829
         self.token = token
         self.results: list[TestResult] = []
 

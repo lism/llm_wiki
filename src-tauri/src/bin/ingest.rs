@@ -214,10 +214,8 @@ async fn run_scan(
 
     for (idx, file) in files.iter().enumerate() {
         let rel = file.to_string_lossy();
-        let size = file
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let abs = Path::new(project).join(file);
+        let size = abs.metadata().map(|m| m.len()).unwrap_or(0);
         let size_kb = size as f64 / 1024.0;
 
         eprint!("[{}/{}] {rel}  ({size_kb:.0} KB)  ", idx + 1, total);
