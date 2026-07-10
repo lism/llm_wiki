@@ -11,7 +11,7 @@ from http.client import HTTPConnection
 
 BASE = "127.0.0.1:19829"
 TOKEN = "GFPoWuK7kpqepXJ-m8N1gb2HeQArqvDePA1tEXUQW-I"
-PROJECT = "current"  # or use a specific project id
+PROJECT = "9ae34aae-4e08-4fab-bb0e-df974367e072"  # or use a specific project id
 
 query = sys.argv[1] if len(sys.argv) > 1 else "what is this wiki about?"
 

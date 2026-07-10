@@ -412,7 +412,7 @@ pub fn parse_file_blocks(text: &str) -> (Vec<ParsedBlock>, Vec<String>) {
         }
 
         blocks.push(ParsedBlock {
-            path,
+            path: path.to_lowercase(),
             content: content_lines.join("\n"),
         });
     }
