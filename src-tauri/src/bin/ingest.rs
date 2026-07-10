@@ -194,6 +194,7 @@ async fn run_scan(
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&sources_dir)
         .into_iter()
+        .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {

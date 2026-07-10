@@ -457,7 +457,8 @@ fn is_safe_ingest_path(p: &str) -> bool {
     if normalized.split('/').any(|seg| seg == "..") {
         return false;
     }
-    if !normalized.starts_with("wiki/") {
+    let lower = normalized.to_lowercase();
+    if !lower.starts_with("wiki/") {
         return false;
     }
     true
