@@ -17,7 +17,6 @@ use llm_wiki_lib::api_context::ApiContext;
 use llm_wiki_lib::commands::chat::ChatLlmConfig;
 use llm_wiki_lib::commands::ingest;
 use serde_json;
-use uuid::Uuid;
 
 // ── CLI ──────────────────────────────────────────────────────────
 
@@ -323,14 +322,14 @@ async fn run_single(
 fn ensure_project_scaffold(project_path: &Path) {
     let schema = project_path.join("schema.md");
     if !schema.exists() {
-        let content = include_str!("../../commands/project_schema_template.md");
+        let content = include_str!("../commands/project_schema_template.md");
         let _ = std::fs::write(&schema, content);
         eprintln!("Created schema.md");
     }
 
     let purpose = project_path.join("purpose.md");
     if !purpose.exists() {
-        let content = include_str!("../../commands/project_purpose_template.md");
+        let content = include_str!("../commands/project_purpose_template.md");
         let _ = std::fs::write(&purpose, content);
         eprintln!("Created purpose.md");
     }
