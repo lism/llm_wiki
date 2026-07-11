@@ -143,7 +143,9 @@ fn main() {
     let project_path = args.project.canonicalize().unwrap_or_else(|_| args.project.clone());
     let project_str = project_path.to_string_lossy().to_string();
 
-    // Ensure the project is registered so the API server can find it
+    // Ensure project scaffolding exists (schema.md, purpose.md, wiki/, ...)
+    ensure_project_scaffold(&project_path);
+    // Register so the API server can discover it
     register_project(&project_path, &ctx.data_dir);
 
     eprintln!("Project:    {}", project_path.display());
@@ -315,6 +317,45 @@ async fn run_single(
 }
 
 // ── platform helpers ─────────────────────────────────────────────
+
+/// Create project scaffolding files (schema.md, purpose.md, wiki/…) if
+/// they don't already exist.
+fn ensure_project_scaffold(project_path: &Path) {
+    let schema = project_path.join("schema.md");
+    if !schema.exists() {
+        let content = include_str!("../../commands/project_schema_template.md");
+        let _ = std::fs::write(&schema, content);
+        eprintln!("Created schema.md");
+    }
+
+    let purpose = project_path.join("purpose.md");
+    if !purpose.exists() {
+        let content = include_str!("../../commands/project_purpose_template.md");
+        let _ = std::fs::write(&purpose, content);
+        eprintln!("Created purpose.md");
+    }
+
+    let wiki = project_path.join("wiki");
+    let _ = std::fs::create_dir_all(&wiki);
+
+    let index = wiki.join("index.md");
+    if !index.exists() {
+        let _ = std::fs::write(&index, "# Wiki Index\n\n");
+    }
+
+    let log = wiki.join("log.md");
+    if !log.exists() {
+        let _ = std::fs::write(&log, "# Wiki Log\n\n");
+    }
+
+    let overview = wiki.join("overview.md");
+    if !overview.exists() {
+        let _ = std::fs::write(&overview, "# Wiki Overview\n\n");
+    }
+
+    let raw = project_path.join("raw/sources");
+    let _ = std::fs::create_dir_all(&raw);
+}
 
 /// Create `.llm-wiki/project.json` and register the project in
 /// `app-state.json` so the API server can discover it.
