@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use llm_wiki_lib::api_context::ApiContext;
 use llm_wiki_lib::commands::chat::ChatLlmConfig;
 use llm_wiki_lib::commands::ingest;
+use serde_json;
+use uuid::Uuid;
 
 // ── CLI ──────────────────────────────────────────────────────────
 
@@ -140,6 +142,9 @@ fn main() {
 
     let project_path = args.project.canonicalize().unwrap_or_else(|_| args.project.clone());
     let project_str = project_path.to_string_lossy().to_string();
+
+    // Ensure the project is registered so the API server can find it
+    register_project(&project_path, &ctx.data_dir);
 
     eprintln!("Project:    {}", project_path.display());
     eprintln!("Data dir:   {}", ctx.data_dir.display());
@@ -310,6 +315,75 @@ async fn run_single(
 }
 
 // ── platform helpers ─────────────────────────────────────────────
+
+/// Create `.llm-wiki/project.json` and register the project in
+/// `app-state.json` so the API server can discover it.
+fn register_project(project_path: &Path, data_dir: &Path) {
+    let llm_wiki_dir = project_path.join(".llm-wiki");
+    let _ = std::fs::create_dir_all(&llm_wiki_dir);
+
+    let project_json = llm_wiki_dir.join("project.json");
+    let project_id = if project_json.exists() {
+        // Read existing ID
+        std::fs::read_to_string(&project_json)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    } else {
+        let id = uuid::Uuid::new_v4().to_string();
+        let json = serde_json::json!({
+            "id": &id,
+            "name": project_path.file_name().unwrap_or_default().to_string_lossy(),
+        });
+        let _ = std::fs::write(&project_json, serde_json::to_string_pretty(&json).unwrap_or_default());
+        id
+    };
+
+    // Register in app-state.json
+    let app_state_path = data_dir.join("app-state.json");
+    let mut state: serde_json::Value = std::fs::read_to_string(&app_state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+
+    let proj_name = project_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let proj_path = project_path.to_string_lossy().to_string();
+
+    // Update projectRegistry
+    if let Some(registry) = state.get_mut("projectRegistry") {
+        if let Some(obj) = registry.as_object_mut() {
+            obj.entry(&project_id).or_insert_with(|| serde_json::json!({
+                "name": &proj_name,
+                "path": &proj_path,
+            }));
+        }
+    } else {
+        state["projectRegistry"] = serde_json::json!({
+            &project_id: { "name": &proj_name, "path": &proj_path }
+        });
+    }
+
+    // Update recentProjects
+    if let Some(recents) = state.get_mut("recentProjects") {
+        if let Some(arr) = recents.as_array_mut() {
+            let exists = arr.iter().any(|v| {
+                v.get("path").and_then(|p| p.as_str()) == Some(&proj_path)
+            });
+            if !exists {
+                arr.push(serde_json::json!({ "name": &proj_name, "path": &proj_path }));
+            }
+        }
+    } else {
+        state["recentProjects"] = serde_json::json!([{ "name": &proj_name, "path": &proj_path }]);
+    }
+
+    if let Ok(json) = serde_json::to_string_pretty(&state) {
+        let _ = std::fs::write(&app_state_path, json);
+    }
+
+    eprintln!("Registered project {} ({})", proj_name, project_id);
+}
 
 fn default_data_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
