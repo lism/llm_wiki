@@ -8,11 +8,15 @@ Usage:
     python fastgpt_demo.py --list-models       # 列出可用模型
 """
 
-import json, sys
+import json, sys, socket
 from http.client import HTTPConnection
 
+# 连接超时（秒）— http.client 的 timeout 只控制读取，连接超时需要
+# 通过 socket 全局设置
+socket.setdefaulttimeout(10)
+
 BASE = "199.66.68.17:3100"
-KEY = "YOUR_FASTGPT_API_KEY"
+KEY = "fastgpt-taeu811BfCboxI6PX4jl2uecATMCNKZstjIS8cicctTIXXzh7xzVDk5WZ7bp3"
 ENDPOINT = "/api/v1/chat/completions"
 MODEL = "gpt-3.5-turbo"  # FastGPT 的模型名可能不同，可以 --list-models 查看
 
@@ -51,11 +55,15 @@ def chat(query, debug=False):
         "stream": True,
     })
 
-    conn = HTTPConnection(BASE, timeout=120)
-    conn.request("POST", ENDPOINT, body=body, headers={
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {KEY}",
-    })
+    try:
+        conn = HTTPConnection(BASE, timeout=120)
+        conn.request("POST", ENDPOINT, body=body, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {KEY}",
+        })
+    except (socket.timeout, OSError) as e:
+        print(f"Connection error: {e}")
+        return
 
     resp = conn.getresponse()
     if debug:
@@ -70,6 +78,7 @@ def chat(query, debug=False):
         return
 
     buf = ""
+    token_count = 0
     for chunk in resp:
         buf += chunk.decode("utf-8")
         if debug:
@@ -83,13 +92,17 @@ def chat(query, debug=False):
                     print()
                     break
                 try:
-                    token = json.loads(data)["choices"][0]["delta"].get("content", "")
-                    print(token, end="", flush=True)
+                    token = json.loads(data)["choices"][0]["delta"].get("content") or ""
+                    if token:
+                        print(token, end="", flush=True)
+                        token_count += 1
                 except:
                     if debug:
                         print(f"\n[PARSE FAIL] {data[:200]}")
             elif line and debug:
                 print(f"[LINE] {line[:200]}")
+    if token_count == 0:
+        print("(no tokens received — check model name with --list-models)")
     conn.close()
 
 # ── main ──
